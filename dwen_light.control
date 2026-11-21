@@ -1,0 +1,6 @@
+# DataWarehouseEngine framework extension
+comment = 'DataWarehouse Engine'
+default_version = '0.2'
+module_pathname = '$libdir/dwen_light'
+relocatable = false
+schema = 'dwen'
