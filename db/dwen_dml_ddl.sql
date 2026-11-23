@@ -21,6 +21,10 @@ CREATE TABLE dwen.task
     run_timestamp  timestamp                            null,
     timeout_minutes int NOT NULL DEFAULT 60
 );
+
+ALTER TABLE dwen.task ADD CONSTRAINT dwen_task_timeout_minutes_nn
+check ( timeout_minutes >=0 );
+
 alter table dwen.task add COLUMN  timeout_minute int NOT NULL DEFAULT 60;
 alter table dwen.task    rename column timeout_minute to timeout_minutes;
 

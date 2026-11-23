@@ -23,10 +23,20 @@ BEGIN
 
     insert into dwen.dev_tab (field_int, field_text, field_timestamp)
     VALUES (999, 'qweqwe qwe qwe', clock_timestamp());
-    --PERFORM PG_SLEEP(20);
+    PERFORM PG_SLEEP(120);
 END;
 
 $$ LANGUAGE plpgsql;
+
+insert into dwen.task
+(status,
+ proc,
+ execute_string,
+ timeout_minutes)
+VALUES ('READY',
+        'X',
+        'call dwen.dev_test_proc()',
+        10);
 
 GRANT ALL PRIVILEGES ON ROUTINE dwen.dev_test_proc TO dwen;
 

@@ -35,6 +35,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(get_engine_status_active);
 PG_FUNCTION_INFO_V1(set_engine_status_active);
+PG_FUNCTION_INFO_V1(dwen_resume_engine);
 
 int	max_dwen_workers = 1;
 int dwen_active_execution_workers_count = 1;
@@ -250,7 +251,7 @@ void _PG_init(void)
     eng_worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     eng_worker.bgw_restart_time = BGW_NEVER_RESTART;
     sprintf(eng_worker.bgw_library_name, "dwen_light");
-    sprintf(eng_worker.bgw_function_name, "dwen_engine");
+    sprintf(eng_worker.bgw_function_name, "dwen_worker_engine");
     eng_worker.bgw_notify_pid = 0;
 
     /*
@@ -285,9 +286,62 @@ Datum
 set_engine_status_active(PG_FUNCTION_ARGS)
 {
     bool ns = PG_GETARG_BOOL(0);
+
+
     LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
     WorkersArr->EngineActive = ns;
     LWLockRelease(WorkersArr->lock);
+
+
+
     elog(LOG, "DWEN>> SET EngineActive to %s", ns ? "true" : "false"); // todo поправить логику ошибки
     PG_RETURN_BOOL(ns);
+
+    //+ Воркеры висят в статусах ошибок и когда поправиликод процедуры и вызывают эту функцию - нужно воркеры тоже поднять
+    //+ но нужно подумать и вмонтировать в логику когда воркер был прибит извне - поменять статус будет недостаточно
+    // добавить логику сразу в dwen_resume_engine
 }
+
+Datum
+dwen_resume_engine(PG_FUNCTION_ARGS)
+{
+    LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
+    WorkersArr->EngineActive = true;
+    LWLockRelease(WorkersArr->lock);
+    elog(LOG, "DWEN>> Engine worker resumed");
+    PG_RETURN_CSTRING("Engine worker resumed.");
+}
+
+// // Прочесываем пул исполнительных процессов
+// for (int w_ind = 0; w_ind < dwen_active_execution_workers_count; w_ind++)
+// {
+//     // Получаем актуальную информацию по потоку
+//     LWLockAcquire(WorkersArr->lock, LW_SHARED);
+//     WorkerCurrentStatus = WorkersArr->Workers[w_ind].WorkerStatus;
+//     TaskCurrentStatus = WorkersArr->Workers[w_ind].TaskStatus;
+//     worker_task_id = WorkersArr->Workers[w_ind].TaskId;
+//     worker_timeout_treshhold = WorkersArr->Workers[w_ind].TimeoutTreshhold;
+//     worker_handle = WorkersArr->Workers[w_ind].pg_BackgroundWorkerHandle;
+//     is_active = WorkersArr->EngineActive;
+//     LWLockRelease(WorkersArr->lock);
+//
+//     /* Неблокирующая проверка текущего состояния */
+//
+//
+//     // STOP HERE
+//     // Проверка потока на ошибки
+//     // if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ACTIVE)
+//     // {
+//     //     status = GetBackgroundWorkerPid(worker_handle, &pid);
+//     //     if (status == BGWH_STARTED) // Процесс живой
+//     //     { /// А эту проверку возможно стоит делать для любого статуса воркера, ну кроме STOP - подумать
+//     //
+//     //     }
+//     //
+//     //     else if (status == BGWH_STOPPED) // был вызов kill -TERM
+//     //         /// Вот это и нужно проуерить: воркер системой убивается - по идее его нужно запутсить - нужно пробовать
+//     // }
+//     if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ERROR_SPI)
+//     {
+//     }
+// }

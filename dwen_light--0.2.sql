@@ -148,3 +148,10 @@ AS
 'MODULE_PATHNAME',
 'set_engine_status_active'
     LANGUAGE c;
+
+CREATE or REPLACE FUNCTION dwen.dwen_resume_engine()
+    RETURNS cstring
+AS
+'MODULE_PATHNAME',
+'dwen_resume_engine'
+    LANGUAGE c;
