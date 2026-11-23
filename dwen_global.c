@@ -73,7 +73,7 @@ dwen_log_event(uint8_t event_type, const char *log_message, uint32_t task_id, ch
 		ret = SPI_exec(query.data, 0);
 		if (ret < 0)
 		{
-			suspend_dwen_engine();
+			dwen_suspend_engine();
 			ereport(LOG,
 					errmsg("DWEn.log>> ERROR SPI: SPI_execute return %d. Engine worker has been suspended.", ret)
 				);
@@ -98,7 +98,7 @@ dwen_log_event(uint8_t event_type, const char *log_message, uint32_t task_id, ch
 
 		MemoryContextSwitchTo(extra_memory_context_log);
 
-		suspend_dwen_engine();
+		dwen_suspend_engine();
 
 		debug_query_string = query.data;
 		ereport(LOG,
@@ -120,9 +120,10 @@ dwen_log_event(uint8_t event_type, const char *log_message, uint32_t task_id, ch
 }
 
 void
-suspend_dwen_engine()
+dwen_suspend_engine()
 {
 	LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
 	WorkersArr->EngineActive = false;
 	LWLockRelease(WorkersArr->lock);
+
 }

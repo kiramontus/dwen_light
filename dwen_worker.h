@@ -7,7 +7,7 @@
 #include "postgres.h"
 
 static uint32 dwen_worker_wait_event_main = 0;
-void dwen_worker(Datum main_arg);
+void dwen_worker_executor(Datum main_arg);
 extern char *dwen_database;
 extern char *dwen_role;
 #endif //PG_DWF_DWEN_WORKER_H
