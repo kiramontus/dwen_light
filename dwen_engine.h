@@ -15,6 +15,6 @@ extern int dwen_active_execution_workers_count;
 extern char *dwen_database;
 extern char *dwen_role;
 
-bool DWEnSetNextTaskToWorker(int worker_index);
+bool assign_next_task_to_worker(int worker_index);
 
 #endif //PG_DWF_DWEN_ENGINE_H

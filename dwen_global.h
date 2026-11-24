@@ -17,17 +17,18 @@
 #define DWEN_WORKER_STATUS_ERROR_SPI 3
 #define DWEN_WORKER_STATUS_ERROR_DBO 4
 #define DWEN_WORKER_STATUS_STOPPED 5
+// ADD TO MONITOR!!!!
 
 #define DWEN_WORKER_TASK_STATUS_UNDEFINED 0
-#define DWEN_WORKER_TASK_STATUS_WAIT 0
-#define DWEN_WORKER_TASK_STATUS_NEW 1
-#define DWEN_WORKER_TASK_STATUS_EXECUTION 2
-#define DWEN_WORKER_TASK_STATUS_DONE 3
-#define DWEN_WORKER_TASK_STATUS_ERROR 4 // Произошла ошибка внтури кода из dwen.task.execute_string
-#define DWEN_WORKER_TASK_STATUS_CANCELED 5 // Выполнение кода отменено, транзакция не зафиксирована
-#define DWEN_WORKER_TASK_STATUS_WARNING 6 // Ошибка модификации
-#define DWEN_WORKER_TASK_STATUS_TIMEOUT 7 // Превышен таймаут по задаче из dwen.task.timeout_minutes
-
+#define DWEN_WORKER_TASK_STATUS_WAIT 1
+#define DWEN_WORKER_TASK_STATUS_NEW 2
+#define DWEN_WORKER_TASK_STATUS_EXECUTION 3
+#define DWEN_WORKER_TASK_STATUS_DONE 4
+#define DWEN_WORKER_TASK_STATUS_ERROR 5 // Произошла ошибка внтури кода из dwen.task.execute_string
+#define DWEN_WORKER_TASK_STATUS_CANCELED 6 // Выполнение кода отменено, транзакция не зафиксирована
+#define DWEN_WORKER_TASK_STATUS_WARNING 7 // Ошибка модификации
+#define DWEN_WORKER_TASK_STATUS_TIMEOUT 8 // Превышен таймаут по задаче из dwen.task.timeout_minutes
+// ADD TO MONITOR!!!!
 
 
 /* value cached, fetched from shared memory */

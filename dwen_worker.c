@@ -184,12 +184,11 @@ void dwen_worker_executor(Datum main_arg)
 	        	{
 	        		AbortCurrentTransaction();
 	        	    task_status = DWEN_WORKER_TASK_STATUS_CANCELED;
-
 	        	    if (is_error_spi)
 	        	    {
 	        	        worker_status = DWEN_WORKER_STATUS_ERROR_SPI;
 	        	        ereport(LOG,
-                                errmsg("DWEn.%02d>> ERROR SPI: SPI_execute return %d. Engine worker has been suspended." ,index, ret)
+                                errmsg("DWEn.%02d>> ERROR: SPI_execute returned %d. Engine worker has been suspended." ,index, ret)
                                 );
 
 
@@ -261,6 +260,7 @@ void dwen_worker_executor(Datum main_arg)
 
 	        if (!dwen_worker_sigterm)
 	        {
+	            elog(LOG, "DWEn.%02d>> task_status = ", index, task_status);
 	            LWLockAcquire(WorkersArr->lock , LW_EXCLUSIVE);
 	            WorkersArr->Workers[index].TaskStatus = task_status; // обновить статус задачи
 	            if (worker_status != DWEN_WORKER_STATUS_UNDEFINED)

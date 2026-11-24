@@ -31,11 +31,20 @@
 #include "dwen_light.h"
 #include "utils/memutils.h"
 
+#include "postgres.h"
+#include "fmgr.h"
+#include "funcapi.h"
+#include "miscadmin.h"
+#include "utils/builtins.h"
+#include "utils/tuplestore.h"
+
+
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(get_engine_status_active);
 PG_FUNCTION_INFO_V1(set_engine_status_active);
 PG_FUNCTION_INFO_V1(dwen_resume_engine);
+
 
 int	max_dwen_workers = 1;
 int dwen_active_execution_workers_count = 1;

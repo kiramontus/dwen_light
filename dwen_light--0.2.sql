@@ -155,3 +155,8 @@ AS
 'MODULE_PATHNAME',
 'dwen_resume_engine'
     LANGUAGE c;
+
+CREATE FUNCTION dwen.dwen_status_monitor()
+    RETURNS TABLE (worker text, status text, task_status text, task_id int, minutes_to_timeout int)
+AS 'MODULE_PATHNAME', 'dwen_status_monitor'
+    LANGUAGE C VOLATILE;

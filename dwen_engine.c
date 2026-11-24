@@ -220,7 +220,7 @@ void dwen_worker_engine(Datum main_arg)
                 worker_handle = WorkersArr->Workers[w_ind].pg_BackgroundWorkerHandle;
                 is_active = WorkersArr->EngineActive;
                 LWLockRelease(WorkersArr->lock);
-
+                elog(LOG, "DWEn.ew>> W[%02d] WS = %d, TS = %d",w_ind,WorkerCurrentStatus,TaskCurrentStatus);
                 /* Неблокирующая проверка текущего состояния */
 
 
@@ -228,6 +228,7 @@ void dwen_worker_engine(Datum main_arg)
                 // Проверка потока на ошибки
                 if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ACTIVE)
                 {
+                    //elog(LOG, "DWEn.ew>> --- 3");
                     status = GetBackgroundWorkerPid(worker_handle, &pid);
                     switch (status)
                     {
@@ -270,9 +271,11 @@ void dwen_worker_engine(Datum main_arg)
                     // else if (status == BGWH_STOPPED) // был вызов kill -TERM
                     //     /// Вот это и нужно проуерить: воркер системой убивается - по идее его нужно запутсить - нужно пробовать
                 }
-                else if (WorkerCurrentStatus == DWEN_WORKER_STATUS_STOPPED
+
+                if (WorkerCurrentStatus == DWEN_WORKER_STATUS_STOPPED
                     && TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_CANCELED)
                 {
+                 //   elog(LOG, "DWEn.ew>> --- 4");
                     set_task_status(worker_task_id,DWEN_TASK_STATUS_READY); /* Сбрасываем статус задачи */
 
                     LWLockAcquire(WorkersArr->lock, LW_SHARED);
@@ -281,6 +284,7 @@ void dwen_worker_engine(Datum main_arg)
                 }
                 else if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ERROR_SPI)
                 {
+                  //  elog(LOG, "DWEn.ew>> --- 5");
                     // Задачу возвращаем в статус готовности к выполнению, т.к. она точно не выполнилась
 
                     set_task_status(worker_task_id,DWEN_TASK_STATUS_READY);
@@ -297,6 +301,7 @@ void dwen_worker_engine(Datum main_arg)
                 }
                 else if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ERROR_DBO) ////
                 {
+                //    elog(LOG, "DWEn.ew>> --- 6");
                     dwen_suspend_engine(); ////
 
                     set_task_status(worker_task_id,DWEN_TASK_STATUS_READY);
@@ -313,6 +318,7 @@ void dwen_worker_engine(Datum main_arg)
                 }
                 else // с потоком все хорошо - обрабатываем
                 {
+                //    elog(LOG, "DWEn.ew>> --- 7");
                     // Если поток обработал задачу
                     if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_DONE
                         || TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_ERROR)
@@ -328,19 +334,26 @@ void dwen_worker_engine(Datum main_arg)
                             dwen_log_event(DWEN_LOG_TRACE, "Error while executing task", worker_task_id, "00000");
                         }
                         TaskCurrentStatus = DWEN_WORKER_TASK_STATUS_WAIT;
-
                         LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
                         WorkersArr->Workers[w_ind].TaskId = 0;
                         WorkersArr->Workers[w_ind].TaskStatus = TaskCurrentStatus;
                         LWLockRelease(WorkersArr->lock);
-
                         check_ready_task = true;
                     }
                     else if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_TIMEOUT)
                     {
                         set_task_status(worker_task_id,DWEN_TASK_STATUS_TIMEOUT);
                         TaskCurrentStatus = DWEN_WORKER_TASK_STATUS_WAIT;
+
+                        LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
+                        WorkersArr->Workers[w_ind].TaskId = 0;
+                        WorkersArr->Workers[w_ind].TaskStatus = TaskCurrentStatus;
+                        WorkersArr->Workers[w_ind].TimeoutTimer = 0;
+                        WorkersArr->Workers[w_ind].TimeoutTreshhold = 0;
+                        LWLockRelease(WorkersArr->lock);
                     }
+
+
 
                     //  elog(LOG, "DWEn.ew>> W[%02d]TaskCurrentStatus = %d", w_ind, TaskCurrentStatus);
                     if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_EXECUTION // поток выполняется
@@ -395,9 +408,9 @@ void dwen_worker_engine(Datum main_arg)
                     if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_WAIT && check_ready_task)
                     {
                         // Поток готов к обработке новой задачи
-                        //int32 task_id = DWEnSetNextTaskToWorker(w_ind);
+                        //int32 task_id = assign_next_task_to_worker(w_ind);
 
-                        if (DWEnSetNextTaskToWorker(w_ind)) // Нашлась задача, готовая к заупску
+                        if (assign_next_task_to_worker(w_ind)) // Нашлась задача, готовая к заупску
                         {
                             // Будим исполнительный процесс
                             LWLockAcquire(WorkersArr->lock, LW_SHARED);
@@ -464,76 +477,116 @@ void dwen_worker_engine(Datum main_arg)
     /* Not reachable */
 }
 
-const char* query_get_next_task_id =
+static const char* query_get_next_task_id =
     "merge into dwen.task  trg "
     "using (select id, timeout_minutes from dwen.task where status = 'READY' order by id limit 1) src "
     "    on trg.id = src.id "
     "    when matched then update set status = 'RUN', run_timestamp = CLOCK_TIMESTAMP() "
     "returning trg.id, src.timeout_minutes";
 
-bool DWEnSetNextTaskToWorker(int worker_index)
+bool assign_next_task_to_worker(int worker_index)
 {
-    //  elog(LOG, "DWEn ENG >>> next_task -8");
     int32 next_task_id = 0;
     int32 timeout_minutes;
-    bool new_task_found = false;
-
     MemoryContext work_context;
-    // elog(LOG, "DWEn ENG >>> 000-1");
+    bool is_error_dbo = false;
+    bool is_error_spi = false;
+    bool new_task_found = false;
+    int  ret;
+
     if (extra_memory_context_engine == NULL)
         extra_memory_context_engine = AllocSetContextCreate(TopMemoryContext,
                                                             "DWEn engine worker context",
                                                             ALLOCSET_DEFAULT_SIZES);
 
-    // elog(LOG, "DWEn ENG >>> 0000");
     MemoryContextReset(extra_memory_context_engine);
     work_context = MemoryContextSwitchTo(extra_memory_context_engine);
 
     SetCurrentStatementStartTimestamp();
     StartTransactionCommand();
     SPI_connect();
-    // if (SPI_connect() <> SPI_OK_CONNECT)
-    // {
-    // }
     PushActiveSnapshot(GetTransactionSnapshot());
-    // elog(LOG, "DWEn ENG >>> 0001 %s",query_get_next_task_id);
-    //query_get_next_task_id
-    //elog(LOG, "DWEn.ew>> Worker %d CT 001",worker_index);
+    pgstat_report_activity(STATE_RUNNING, query_get_next_task_id);
+
+     elog(LOG, "DWEn ENG >>> 0001");
     PG_TRY();
         {
-            int res;
-
-            // debug_query_string = query_eng.data;
-            pgstat_report_activity(STATE_RUNNING, query_get_next_task_id);
-
-            if (SPI_exec(query_get_next_task_id, 0) < 0)
-                elog(ERROR, "SPI_exec returned unexpected negative status"); // todo поправить логику ошибки
-
-            if (SPI_processed > 0)
+            ret = SPI_exec(query_get_next_task_id, 0);
+            if (ret >0 ) // Нет ошибки SPI
             {
-                bool isnull;
-                next_task_id = DatumGetInt32(SPI_getbinval(SPI_tuptable->vals[0],
-                                                           SPI_tuptable->tupdesc, 1, &isnull));
-
-                timeout_minutes = DatumGetInt32(SPI_getbinval(SPI_tuptable->vals[0],
-                                                           SPI_tuptable->tupdesc, 2, &isnull));
-                //++ Проврека на null и на больше или равно  нулю!!!!
-
-                LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
-                WorkersArr->Workers[worker_index].TaskId = next_task_id;
-                WorkersArr->Workers[worker_index].TaskStatus = DWEN_WORKER_TASK_STATUS_NEW;
-                WorkersArr->Workers[worker_index].TimeoutTimer = 0;
-                WorkersArr->Workers[worker_index].TimeoutTreshhold = timeout_minutes;
-                LWLockRelease(WorkersArr->lock);
-                new_task_found = true;
-                elog(LOG, "DWEn.ew>> NewTask  %d to Worker %d",next_task_id,worker_index); // todo поправить логику ошибки
-                //  elog(LOG, "DWEn ENG >>> 0003");
-
+                if (SPI_processed  == 1) // Вернулась одна запись - query_get_next_task_id вернул значение
+                {
+                    if (SPI_gettypeid(SPI_tuptable->tupdesc, 1) == INT4OID
+                        && SPI_gettypeid(SPI_tuptable->tupdesc, 2) == INT4OID) // тип возвращенного результата -  INT
+                    {
+                        bool  is_null;
+                        next_task_id = DatumGetInt32(SPI_getbinval(SPI_tuptable->vals[0],
+                                           SPI_tuptable->tupdesc, 1, &is_null));
+                        if (!is_null)
+                        {
+                            timeout_minutes = DatumGetInt32(SPI_getbinval(SPI_tuptable->vals[0],
+                                                          SPI_tuptable->tupdesc, 2, &is_null));
+                            if (!is_null)
+                            {
+                                LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
+                                WorkersArr->Workers[worker_index].TaskId = next_task_id;
+                                WorkersArr->Workers[worker_index].TaskStatus = DWEN_WORKER_TASK_STATUS_NEW;
+                                WorkersArr->Workers[worker_index].TimeoutTimer = 0;
+                                WorkersArr->Workers[worker_index].TimeoutTreshhold = timeout_minutes;
+                                LWLockRelease(WorkersArr->lock);
+                                new_task_found = true;
+                                elog(LOG, "DWEn.ew>> NewTask  %d assigned to Worker %d",next_task_id,worker_index);// DBG
+                            }
+                            else // Если запрос вернул строку, но там null - это ошибка на стороне БД
+                                is_error_dbo = true;
+                        }
+                        else // Если запрос вернул строку, но там null - это ошибка на стороне БД
+                            is_error_dbo = true;
+                    }
+                    else
+                        is_error_dbo = true;
+                }
+                else if (SPI_processed  == 0) // нет задач для запуска
+                    new_task_found = false;
+                else // query_get_next_task_id вернула больше одной строки
+                    is_error_dbo = true;
             }
+            else //  Ошибка SPI
+            {
+                is_error_spi = true;
+            }
+
             SPI_finish();
             PopActiveSnapshot();
-            CommitTransactionCommand();
-            pgstat_report_activity(STATE_IDLE, NULL);
+
+            if (!is_error_spi && !is_error_dbo)
+            {
+                CommitTransactionCommand();
+            }
+            else
+            {
+                AbortCurrentTransaction();
+                debug_query_string = query_get_next_task_id;
+                dwen_suspend_engine();
+                if (is_error_spi)
+                {
+                    ereport(LOG,
+                            errmsg("DWEn.en>> ERROR: SPI_execute returned %d. Engine worker has been suspended.", ret)
+                            );
+
+                    // todo Добавить внутреннй тип ошибки в лог DWEN и передавать ее туда
+                    //+ запись в таблицу log
+                }
+                else if (is_error_dbo)
+                {
+                    ereport(LOG,
+                            errmsg("DWEn.en>> ERROR Table 'dwen.task' was modified incorrectly. Engine worker has been suspended."),
+                            errhint("After the cause is resolved, call procedure 'select dwen.set_engine_status_active(true)' to resume the process.")
+                            );
+                    //+ запись в таблицу log
+                }
+                debug_query_string = NULL;
+            }
         }
     PG_CATCH();
         {
@@ -562,13 +615,13 @@ bool DWEnSetNextTaskToWorker(int worker_index)
                     ));
 
             FreeErrorData(error_data);
-            pgstat_report_activity(STATE_IDLE, NULL);
         }
     PG_END_TRY();
     MemoryContextSwitchTo(work_context);
     MemoryContextReset(extra_memory_context_engine);
+    pgstat_report_activity(STATE_IDLE, NULL);
     debug_query_string = NULL;
-    // elog(LOG, "DWEn ENG >>> 99");
+
     return new_task_found;
 }
 
@@ -633,16 +686,11 @@ static void set_task_status(uint32_t task_id, uint8_t task_status)
                                                             "DWEn engine worker context",
                                                             ALLOCSET_DEFAULT_SIZES);
 
-    // elog(LOG, "DWEn ENG >>> 0000");
     MemoryContextReset(extra_memory_context_engine);
     work_context = MemoryContextSwitchTo(extra_memory_context_engine);
-   // elog(LOG, "-----> 1");
     SetCurrentStatementStartTimestamp();
     StartTransactionCommand();
     SPI_connect();
-    // if (SPI_connect() <> SPI_OK_CONNECT)
-    // {
-    // }
     PushActiveSnapshot(GetTransactionSnapshot());
 
     PG_TRY();

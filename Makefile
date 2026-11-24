@@ -2,7 +2,7 @@
 MODULE_big   = dwen_light
 
 # Список объектных файлов (.o), полученных из ваших .c файлов
-OBJS         = dwen_global.o dwen_light.o dwen_worker.o dwen_engine.o
+OBJS         = dwen_global.o dwen_light.o dwen_worker.o dwen_engine.o dwen_monitor.o
 
 
 EXTENSION = dwen_light
