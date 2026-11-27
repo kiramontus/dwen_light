@@ -91,6 +91,13 @@ dwen_shmem_startup(void)
     if(!found) {
         WorkersArr->lock = &(GetNamedLWLockTranche("DWEnWorkers"))->lock;
         WorkersArr->EngineActive = true;
+        for (int i=0;i<DWEN_MAX_WORKERS;i++)
+        {
+            // Сброс счетчика запусков
+            WorkersArr->Workers[i].start_counter = 0;
+        }
+
+
     }
 
     DWEnEngineState = ShmemInitStruct("DWEnEngineStateType", sizeof(DWEnEngineStateType),
@@ -224,6 +231,7 @@ void _PG_init(void)
                             NULL,
                             NULL,
                             NULL);
+
 
     dwen_active_execution_workers_count = max_dwen_workers;
     // elog(LOG, "DWEn _PG_init>>  max_dwen_workers = %d",max_dwen_workers);

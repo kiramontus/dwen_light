@@ -25,7 +25,7 @@ static  MemoryContext extra_memory_context_worker = NULL;
 #define DWEN_EXECUTION_ERROR_SPI (1<<0)
 #define DWEN_EXECUTION_ERROR_DWEN_DBO (1<<1)
 #define DWEN_EXECUTION_ERROR_DWEN_DBO (1<<1)
-static volatile sig_atomic_t dwen_worker_sigterm = false;
+// static volatile sig_atomic_t dwen_worker_sigterm = false;
 
 void dwen_worker_executor(Datum main_arg)
 {
@@ -38,12 +38,12 @@ void dwen_worker_executor(Datum main_arg)
     uint8_t        worker_status;
     char  WaitEventExtension_txt[20];
     pid_t WorkerPID;
-    bool dwen_worker_sigterm = false;
+    // bool dwen_worker_sigterm = false;
 
     pqsignal(SIGHUP, SignalHandlerForConfigReload);
     pqsignal(SIGTERM, die);
     pqsignal(SIGINT, StatementCancelHandler);
-//+++ написать обработчики
+
     BackgroundWorkerUnblockSignals();
 
     /* Connect to database */
@@ -77,11 +77,11 @@ void dwen_worker_executor(Datum main_arg)
 	    if (dwen_worker_wait_event_main == 0)
 	        dwen_worker_wait_event_main = WaitEventExtensionNew(WaitEventExtension_txt);
 
-	    WaitLatch(MyLatch,
-                         WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
-                         -1L,
-                         dwen_worker_wait_event_main);
-	    ResetLatch(MyLatch);
+        WaitLatch(MyLatch,
+                  WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
+                  -1L,
+                  dwen_worker_wait_event_main);
+        ResetLatch(MyLatch);
 
 	    CHECK_FOR_INTERRUPTS();
 
@@ -207,6 +207,10 @@ void dwen_worker_executor(Datum main_arg)
 	        }
 	        PG_CATCH();
 	        {
+	            // Получен сигнал SIGTERM
+	            if (ProcDiePending)
+	                PG_RE_THROW();
+
 	        	debug_query_string = NULL;
 	            ErrorData* error_data;
 	            MemoryContextSwitchTo(extra_memory_context_worker);
@@ -225,13 +229,6 @@ void dwen_worker_executor(Datum main_arg)
                             );
 
 	                //++ в лог!!!
-	            }
-	            // Получен сигнал SIGTERM
-	            else if (error_data->sqlerrcode == ERRCODE_ADMIN_SHUTDOWN)
-	            {
-	                dwen_worker_sigterm = true;
-	                task_status = DWEN_WORKER_TASK_STATUS_CANCELED;
-	                worker_status = DWEN_WORKER_STATUS_STOPPED;
 	            }
                 else // другие ошибки вызова процедуры
                 {
@@ -258,28 +255,17 @@ void dwen_worker_executor(Datum main_arg)
 	        pgstat_report_stat(true); // todo проверить а нужна ли она тут?
 	        pgstat_report_activity(STATE_IDLE, NULL);
 
-	        if (!dwen_worker_sigterm)
-	        {
-	            elog(LOG, "DWEn.%02d>> task_status = ", index, task_status);
-	            LWLockAcquire(WorkersArr->lock , LW_EXCLUSIVE);
-	            WorkersArr->Workers[index].TaskStatus = task_status; // обновить статус задачи
-	            if (worker_status != DWEN_WORKER_STATUS_UNDEFINED)
-	                WorkersArr->Workers[index].WorkerStatus = worker_status; // обновить статус воркера
-	            LWLockRelease(WorkersArr->lock );
+	        elog(LOG, "DWEn.%02d>> task_status = ", index, task_status);
+	        LWLockAcquire(WorkersArr->lock , LW_EXCLUSIVE);
+	        WorkersArr->Workers[index].TaskStatus = task_status; // обновить статус задачи
+	        if (worker_status != DWEN_WORKER_STATUS_UNDEFINED)
+	            WorkersArr->Workers[index].WorkerStatus = worker_status; // обновить статус воркера
+	        else // Не произошло ошибок при выполнении - сбрасываю счетчик перезапуска
+	            WorkersArr->Workers[index].start_counter = 1;
+	        LWLockRelease(WorkersArr->lock );
 
-	            // Сигнал основному потоку
-	            SetLatch(&GetPGProcByNumber(WorkersArr->EngineProcNumber)->procLatch);
-	        }
-	        else
-	        {
-	            LWLockAcquire(WorkersArr->lock , LW_EXCLUSIVE);
-	            WorkersArr->Workers[index].TaskStatus = DWEN_WORKER_TASK_STATUS_CANCELED; // обновить статус задачи
-	            WorkersArr->Workers[index].WorkerStatus = DWEN_WORKER_STATUS_STOPPED; // обновить статус воркера
-	            LWLockRelease(WorkersArr->lock );
-
-	            ereport(LOG, (errmsg("DWEn.%02d>> Execution worker got SIGTERM. Task %d status will be returned to READY" , index,task_id)));
-	            proc_exit(0);
-	        }
+	        // Сигнал основному потоку
+	        SetLatch(&GetPGProcByNumber(WorkersArr->EngineProcNumber)->procLatch);
 	    }
 	    // else
 	    // {

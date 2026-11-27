@@ -125,5 +125,6 @@ dwen_suspend_engine()
 	LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
 	WorkersArr->EngineActive = false;
 	LWLockRelease(WorkersArr->lock);
+    //elog(LOG, "DWEn ENG >>> dwen_suspend_engine CALL");
 
 }

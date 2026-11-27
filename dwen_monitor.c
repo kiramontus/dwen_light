@@ -61,12 +61,10 @@ dwen_status_monitor(PG_FUNCTION_ARGS)
     /* Возвращаемся в обычный контекст вызова функции, чтобы временные строки очищались */
     MemoryContextSwitchTo(oldcontext);
 
-    /* 4. В цикле формируем и записываем все строки в Tuplestore */
-    //(worker text, status text, task_status text, task_id int, minutes_to_timeout int)
-    for (int w_ind = 0; w_ind < dwen_active_execution_workers_count; w_ind++)
-    {
+     // Основной воркер
         Datum values[5];
-        bool nulls[5] = {false, false, false, false, false};
+        bool engine_active;
+        bool nulls[5] = {false, false, true, true, true};
         char *str1;
         char *str2;
         char *str3;
@@ -76,6 +74,59 @@ dwen_status_monitor(PG_FUNCTION_ARGS)
         int32_t timeout_timer;
         int32_t timeout_trashhold;
         int32_t timeout;
+
+        LWLockAcquire(WorkersArr->lock, LW_SHARED);
+        engine_active = WorkersArr->EngineActive;
+        LWLockRelease(WorkersArr->lock);
+
+        /* Создаем временные C-строки */
+        str1 = pstrdup("DWEn engine ");
+
+        switch (engine_active)
+        {
+            case true:
+                str2 = pstrdup("ACTIVE");
+                break;
+            default:
+                str2 = pstrdup("SUSPENDED");
+        }
+        /* Преобразуем в text* */
+        values[0] = PointerGetDatum(cstring_to_text(str1));
+        values[1] = PointerGetDatum(cstring_to_text(str2));
+        /*values[2] = PointerGetDatum(cstring_to_text(str3));
+        values[3] = Int32GetDatum(0);
+        values[4] = Int32GetDatum(0);*/
+        /* Кладем строку в Tuplestore (функция сама скопирует данные в свой контекст) */
+        tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+
+        /* Освобождаем временные объекты текущей итерации, чтобы не копить память в цикле */
+        pfree(DatumGetPointer(values[0]));
+        pfree(DatumGetPointer(values[1]));
+
+        pfree(str1);
+        pfree(str2);
+
+
+
+    /* 4. В цикле формируем и записываем все строки в Tuplestore */
+    //(worker text, status text, task_status text, task_id int, minutes_to_timeout int)
+    for (int w_ind = 0; w_ind < dwen_active_execution_workers_count; w_ind++)
+    {
+     /*   Datum values[5];
+        bool nulls[5] = {false, false, false, false, false};
+        char *str1;
+        char *str2;
+        char *str3;
+        uint8_t  worker_current_status;
+        uint8_t  task_current_status;
+        int32_t worker_task_id;
+        int32_t timeout_timer;
+        int32_t timeout_trashhold;
+        int32_t timeout;*/
+
+        nulls[2] = false;
+        nulls[3] = false;
+        nulls[4] = false;
 
         LWLockAcquire(WorkersArr->lock, LW_SHARED);
         worker_current_status = WorkersArr->Workers[w_ind].WorkerStatus;
@@ -150,7 +201,7 @@ dwen_status_monitor(PG_FUNCTION_ARGS)
         values[1] = PointerGetDatum(cstring_to_text(str2));
         values[2] = PointerGetDatum(cstring_to_text(str3));
         values[3] = Int32GetDatum(worker_task_id);
-        if (timeout_trashhold>0)
+        if (timeout_trashhold>0 && task_current_status == DWEN_WORKER_TASK_STATUS_EXECUTION)
             timeout = timeout_trashhold - timeout_timer;
         else
             timeout = -1;

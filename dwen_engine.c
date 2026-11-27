@@ -45,7 +45,7 @@ PGDLLEXPORT pg_noreturn void dwen_worker_engine(Datum main_arg);
 
 static MemoryContext  extra_memory_context_engine = NULL;
 static StringInfoData query;
-static volatile sig_atomic_t dwen_worker_engine_sigterm = false;
+static volatile sig_atomic_t dwen_worker_engine_sigterm;
 
 static void set_task_status(uint32_t task_id, uint8_t task_status);
 static void launch_executor_worker(int index);
@@ -65,8 +65,8 @@ void dwen_worker_engine(Datum main_arg)
     char*          p;
     bits32         flags = 0;
 
-    uint8_t  WorkerCurrentStatus;
-    uint8_t  TaskCurrentStatus;
+    uint8_t  worker_status;
+    uint8_t  worker_task_status;
     int32_t worker_task_id;
     int32_t worker_timeout_treshhold;
 
@@ -92,6 +92,9 @@ void dwen_worker_engine(Datum main_arg)
     /* Establish signal handlers before unblocking signals. */
     pqsignal(SIGHUP, SignalHandlerForConfigReload);
     pqsignal(SIGTERM, dwen_worker_engine_sigterm_handler);
+
+    // Сбрасываем флаг завершения воркера SIGTERM
+    dwen_worker_engine_sigterm = false;
 
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
@@ -139,7 +142,7 @@ void dwen_worker_engine(Datum main_arg)
     {
         int ret;
         int wl_ret;
-        bool is_active;
+        bool engine_is_active;
         pid_t pid;
 
         /* First time, allocate or get the custom wait event */
@@ -149,30 +152,24 @@ void dwen_worker_engine(Datum main_arg)
         wl_ret = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
                            15000L, dwen_engine_wait_event_main);
         ResetLatch(MyLatch);
-        // Вызвана команда заврешения процесса управляющего воркера
+
+        // Не вызвана команда заврешения процесса управляющего воркера
         if (!dwen_worker_engine_sigterm)
         {
             // 1. Проверяем, было ли пробуждение по SetLatch
-            if (wl_ret & WL_LATCH_SET)
-            {
-                // Сбрасываем защелку для следующего использования
-
-                elog(LOG, "DWEn.ew>> DEBUG Worker callback execution");
-                // Ваша логика обработки события SetLatch
-            }
-
-            // 2. Проверяем, произошло ли пробуждение по таймауту
-            if (wl_ret & WL_TIMEOUT)
-            {
-                elog(LOG, "DWEn.ew>> DEBUG Timeout execution");
-                dwen_log_event(DWEN_LOG_INFO, "DWEn ENG >>> TIMER CYCLE", 0, "00000");
-            }
-
-            if (wl_ret & WL_POSTMASTER_DEATH)
-            {
-                // Процесс postmaster завершился — нужно выходить
-                proc_exit(1);
-            }
+            // if (wl_ret & WL_LATCH_SET)
+            // {
+            //
+            //     elog(LOG, "DWEn.ew>> DEBUG Worker callback execution");
+            //     // Ваша логика обработки события SetLatch
+            // }
+            //
+            // // 2. Проверяем, произошло ли пробуждение по таймауту
+            // if (wl_ret & WL_TIMEOUT)
+            // {
+            //     elog(LOG, "DWEn.ew>> DEBUG Timeout execution");
+            //     dwen_log_event(DWEN_LOG_INFO, "DWEn ENG >>> TIMER CYCLE", 0, "00000");
+            // }
 
             CHECK_FOR_INTERRUPTS();
 
@@ -183,6 +180,7 @@ void dwen_worker_engine(Datum main_arg)
             {
                 ConfigReloadPending = false;
                 ProcessConfigFile(PGC_SIGHUP);
+
                 // Изменить базу и пользователя под которым подключаестся основной поток можно только при перезапуске сервера
                 // Для подтверждения возможности смены БД "на лету" нужен эксперимент а пока делаем это невозможным
 
@@ -191,21 +189,18 @@ void dwen_worker_engine(Datum main_arg)
                 // Реализовать отдельной фичей
             }
 
+            // Проверяем таймер и если минута сменилась - выставляем флаг щелчка таймеров в исполниетных потоках
             time_t now = time(NULL);
             local = localtime(&now);
-            //  elog(LOG, "DWEn.ew>> local->tm_min) = %d", local->tm_min);
             if (DWEnEngineState->PrevMinutes != local->tm_min)
             {
-                //elog(LOG, "DWEn.ew>> MIN + 1 ");
                 DWEnEngineState->PrevMinutes = local->tm_min;
                 DWEnEngineState->TickTimers = true;
             }
 
-
-
-
             // Для будущей версии: Вызов процедуры обновления условий запуска по времени будет выполняться отсюда
 
+            // Сбрасываю флаг наличия задач в очереди
             check_ready_task = true;
 
             // Прочесываем пул исполнительных процессов
@@ -213,157 +208,79 @@ void dwen_worker_engine(Datum main_arg)
             {
                 // Получаем актуальную информацию по потоку
                 LWLockAcquire(WorkersArr->lock, LW_SHARED);
-                WorkerCurrentStatus = WorkersArr->Workers[w_ind].WorkerStatus;
-                TaskCurrentStatus = WorkersArr->Workers[w_ind].TaskStatus;
+                worker_status = WorkersArr->Workers[w_ind].WorkerStatus;
+                worker_task_status = WorkersArr->Workers[w_ind].TaskStatus;
                 worker_task_id = WorkersArr->Workers[w_ind].TaskId;
                 worker_timeout_treshhold = WorkersArr->Workers[w_ind].TimeoutTreshhold;
                 worker_handle = WorkersArr->Workers[w_ind].pg_BackgroundWorkerHandle;
-                is_active = WorkersArr->EngineActive;
+                engine_is_active = WorkersArr->EngineActive;
                 LWLockRelease(WorkersArr->lock);
-                elog(LOG, "DWEn.ew>> W[%02d] WS = %d, TS = %d",w_ind,WorkerCurrentStatus,TaskCurrentStatus);
-                /* Неблокирующая проверка текущего состояния */
+                //elog(LOG, "DWEn.ew>> W[%02d] WS = %d, TS = %d",w_ind,WorkerCurrentStatus,TaskCurrentStatus);
 
-
-                // STOP HERE
-                // Проверка потока на ошибки
-                if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ACTIVE)
+                /* Проверка состояния исполнительного процесса */
+                status = GetBackgroundWorkerPid(worker_handle, &pid);
+                // Если воркера убили через SIGTERM - то статусы воркера и задач остаются как при запуске
+                if (status == BGWH_STOPPED &&
+                    worker_status != DWEN_WORKER_STATUS_STOPPED)
                 {
-                    //elog(LOG, "DWEn.ew>> --- 3");
-                    status = GetBackgroundWorkerPid(worker_handle, &pid);
-                    switch (status)
+                    if (!(worker_task_status != DWEN_WORKER_TASK_STATUS_UNDEFINED &&
+                        worker_task_status != DWEN_WORKER_TASK_STATUS_WAIT))
                     {
-                        case BGWH_STARTED:
-                            /* Воркер жив и работает, его PID записан в переменную pid */
-                            elog(LOG, "DWEn.ew>> W[%02d] status = BGWH_STARTED", w_ind);
-                            break;
-
-                        case BGWH_NOT_YET_STARTED:
-                            /* Воркер зарегистрирован, но postmaster его еще не запустил */
-                            elog(LOG, "DWEn.ew>> W[%02d] status = BGWH_NOT_YET_STARTED", w_ind);
-                            break;
-
-                        case BGWH_STOPPED:
-                            /* Воркер завершился (Убили или упал с ошибкой, которую не удалось поймать) */
-
-                            // Воркер выполнял задачу и возникла ошибка
-                            if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_EXECUTION)
-                                set_task_status(worker_task_id,DWEN_TASK_STATUS_READY); /* Сбрасываем статус задачи */
-
-                            LWLockAcquire(WorkersArr->lock, LW_SHARED);
-                            WorkersArr->Workers[w_ind].WorkerStatus = DWEN_WORKER_STATUS_STOPPED;
-                            WorkersArr->Workers[w_ind].TaskStatus = DWEN_WORKER_TASK_STATUS_UNDEFINED;
-                            LWLockRelease(WorkersArr->lock);
-
-                            elog(LOG, "DWEn.ew>> W[%02d] status = BGWH_STOPPED", w_ind);
-
-                            break;
-
-                        case BGWH_POSTMASTER_DIED:
-                            /* Управляющий процесс postmaster умер */
-                            elog(LOG, "DWEn.ew>> W[%02d] status = BGWH_POSTMASTER_DIED", w_ind);
-                            break;
+                        set_task_status(worker_task_id,DWEN_TASK_STATUS_READY); /* Сбрасываем статус задачи */
+                        ereport(LOG, (errmsg("DWEn.ew>> Execution worker [%02d] got SIGTERM. Task %d status returned to READY" , w_ind, worker_task_id)));
+                        //+++ LOG
                     }
-                    // if (status == BGWH_STARTED) // Процесс живой
-                    // { /// А эту проверку возможно стоит делать для любого статуса воркера, ну кроме STOP - подумать
-                    //
-                    // }
-                    //
-                    // else if (status == BGWH_STOPPED) // был вызов kill -TERM
-                    //     /// Вот это и нужно проуерить: воркер системой убивается - по идее его нужно запутсить - нужно пробовать
-                }
-
-                if (WorkerCurrentStatus == DWEN_WORKER_STATUS_STOPPED
-                    && TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_CANCELED)
-                {
-                 //   elog(LOG, "DWEn.ew>> --- 4");
-                    set_task_status(worker_task_id,DWEN_TASK_STATUS_READY); /* Сбрасываем статус задачи */
-
                     LWLockAcquire(WorkersArr->lock, LW_SHARED);
-                    WorkersArr->Workers[w_ind].TaskStatus = DWEN_WORKER_TASK_STATUS_UNDEFINED;
+                    WorkersArr->Workers[w_ind].WorkerStatus = worker_status= DWEN_WORKER_STATUS_STOPPED;
+                    WorkersArr->Workers[w_ind].TaskStatus = worker_task_status = DWEN_WORKER_TASK_STATUS_UNDEFINED;
                     LWLockRelease(WorkersArr->lock);
                 }
-                else if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ERROR_SPI)
+
+                // Обрабатываем финальные статусы / FIN
+                if (worker_status == DWEN_WORKER_STATUS_ACTIVE)// с потоком все хорошо - обрабатываем
                 {
-                  //  elog(LOG, "DWEn.ew>> --- 5");
-                    // Задачу возвращаем в статус готовности к выполнению, т.к. она точно не выполнилась
-
-                    set_task_status(worker_task_id,DWEN_TASK_STATUS_READY);
-
-                    LWLockAcquire(WorkersArr->lock, LW_SHARED);
-                    WorkersArr->Workers[w_ind].TaskStatus = DWEN_WORKER_TASK_STATUS_UNDEFINED;
-                    LWLockRelease(WorkersArr->lock);
-
-                    dwen_log_event(DWEN_LOG_ERROR, "Task execution aborted due internal error", worker_task_id, "00000");
-
-                    // Получается мы исполнительный поток подвесили и нового на него ничего не подаем
-                    // и движок приостановлен. При возобновлении движка поток останется висеть в ошибочном статусе
-                    // todo Сделать перезапуск ошибочных потоков ++ ) А пока будут висеть мертвым грузом
-                }
-                else if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ERROR_DBO) ////
-                {
-                //    elog(LOG, "DWEn.ew>> --- 6");
-                    dwen_suspend_engine(); ////
-
-                    set_task_status(worker_task_id,DWEN_TASK_STATUS_READY);
-
-                    LWLockAcquire(WorkersArr->lock, LW_SHARED);
-                    WorkersArr->Workers[w_ind].TaskStatus = DWEN_WORKER_TASK_STATUS_UNDEFINED;
-                    LWLockRelease(WorkersArr->lock);
-
-                    ereport(LOG,
-                            errmsg("DWEn.ew>> ERROR Engine worker has been suspended."),
-                            errhint(
-                                "After the cause is resolved, call procedure 'select dwen.set_engine_status_active(true)' to resume the process."
-                            ));
-                }
-                else // с потоком все хорошо - обрабатываем
-                {
-                //    elog(LOG, "DWEn.ew>> --- 7");
                     // Если поток обработал задачу
-                    if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_DONE
-                        || TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_ERROR)
+                    if (worker_task_status == DWEN_WORKER_TASK_STATUS_DONE
+                        || worker_task_status == DWEN_WORKER_TASK_STATUS_ERROR)
                     {
-                        if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_DONE)
+                        if (worker_task_status == DWEN_WORKER_TASK_STATUS_DONE)
                         {
                             set_task_status(worker_task_id,DWEN_TASK_STATUS_DONE);
                             dwen_log_event(DWEN_LOG_TRACE, "Task done.", worker_task_id, "00000");
                         }
-                        else if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_ERROR)
+                        else if (worker_task_status == DWEN_WORKER_TASK_STATUS_ERROR)
                         {
                             set_task_status(worker_task_id,DWEN_TASK_STATUS_ERROR);
                             dwen_log_event(DWEN_LOG_TRACE, "Error while executing task", worker_task_id, "00000");
                         }
-                        TaskCurrentStatus = DWEN_WORKER_TASK_STATUS_WAIT;
+                        worker_task_status = DWEN_WORKER_TASK_STATUS_WAIT;
                         LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
                         WorkersArr->Workers[w_ind].TaskId = 0;
-                        WorkersArr->Workers[w_ind].TaskStatus = TaskCurrentStatus;
+                        WorkersArr->Workers[w_ind].TaskStatus = worker_task_status;
                         LWLockRelease(WorkersArr->lock);
                         check_ready_task = true;
                     }
-                    else if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_TIMEOUT)
+                    else if (worker_task_status == DWEN_WORKER_TASK_STATUS_TIMEOUT)
                     {
                         set_task_status(worker_task_id,DWEN_TASK_STATUS_TIMEOUT);
-                        TaskCurrentStatus = DWEN_WORKER_TASK_STATUS_WAIT;
+                        //// Подумать, таймаут - по сути зачача отменена (был terminatetransaction) -
+                        /// возможно timeout вынести в отдельное поле, а задачу в cancel
+                        worker_task_status = DWEN_WORKER_TASK_STATUS_WAIT;
 
                         LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
                         WorkersArr->Workers[w_ind].TaskId = 0;
-                        WorkersArr->Workers[w_ind].TaskStatus = TaskCurrentStatus;
+                        WorkersArr->Workers[w_ind].TaskStatus = worker_task_status;
                         WorkersArr->Workers[w_ind].TimeoutTimer = 0;
                         WorkersArr->Workers[w_ind].TimeoutTreshhold = 0;
                         LWLockRelease(WorkersArr->lock);
                     }
-
-
-
-                    //  elog(LOG, "DWEn.ew>> W[%02d]TaskCurrentStatus = %d", w_ind, TaskCurrentStatus);
-                    if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_EXECUTION // поток выполняется
+                    else if (worker_task_status == DWEN_WORKER_TASK_STATUS_EXECUTION // поток выполняется
                         && DWEnEngineState->TickTimers == true // щелкнул таймер
                         && worker_timeout_treshhold > 0) // и для задачи установлен таймаут
                     {
                         bool task_timeout = false;
                         pid_t worker_pid;
-                        // int dbg_tt;// DBG
-                        // int dbg_ttr;// DBG
+
                         LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
                         WorkersArr->Workers[w_ind].TimeoutTimer = WorkersArr->Workers[w_ind].TimeoutTimer +1;
                         if (WorkersArr->Workers[w_ind].TimeoutTimer > WorkersArr->Workers[w_ind].TimeoutTreshhold)
@@ -371,10 +288,8 @@ void dwen_worker_engine(Datum main_arg)
                             task_timeout = true;
                             worker_pid = WorkersArr->Workers[w_ind].pid;
                         }
-                        // dbg_tt = WorkersArr->Workers[w_ind].TimeoutTimer;// DBG
-                        // dbg_ttr = WorkersArr->Workers[w_ind].TimeoutTreshhold; // DBG
                         LWLockRelease(WorkersArr->lock);
-                        // elog(LOG, "DWEn.ew>> W[%02d] TimeoutTimer = %d, TimeoutTreshhold = %d", w_ind, dbg_tt, dbg_ttr); // DBG
+
                         if (task_timeout)
                         {
                             if (kill(worker_pid, SIGINT) == 0)
@@ -384,32 +299,61 @@ void dwen_worker_engine(Datum main_arg)
                         }
                     }
                 }
-                // Перезапуск процессов
-                if (is_active && WorkerCurrentStatus == DWEN_WORKER_STATUS_ERROR_SPI) // Если движок активен
+                else if (worker_status == DWEN_WORKER_STATUS_ERROR_SPI)
                 {
+                    // Задачу возвращаем в статус готовности к выполнению, т.к. она точно не выполнилась
+                    set_task_status(worker_task_id,DWEN_TASK_STATUS_READY);
+
                     BackgroundWorkerHandle *handle;
                     pid_t pid;
+                    uint8_t rc;
                     LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
                     handle = WorkersArr->Workers[w_ind].pg_BackgroundWorkerHandle;
                     pid = WorkersArr->Workers[w_ind].pid;
+                    rc = WorkersArr->Workers[w_ind].start_counter;
                     LWLockRelease(WorkersArr->lock);
-
-                    elog(LOG, "DWEn.ew>> Restarting execution worker [%02d] with current PID %d.",w_ind, pid);
 
                     TerminateBackgroundWorker(handle);
                     WaitForBackgroundWorkerShutdown(handle);
 
-                    launch_executor_worker(w_ind);
+                    LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
+                    WorkersArr->Workers[w_ind].WorkerStatus = worker_status = DWEN_WORKER_STATUS_STOPPED;
+                    LWLockRelease(WorkersArr->lock);
+
+                    if (rc < 2) // Одна попытка перезапуска
+                    {
+                        elog(LOG, "DWEn.ew>> Restarting execution worker [%02d] with current PID %d.",w_ind, pid);
+                        launch_executor_worker(w_ind);
+                    }
+                    else // Если повтороно воркер уходит в ошибку - то не перзапускаем его
+                    {
+                        elog(LOG, "DWEn.ew>> Error persisted after restarting execution worker [%02d]. Worker with PID %d was shut down. ",w_ind, pid);
+                    }
+                }
+                else if (worker_status == DWEN_WORKER_STATUS_ERROR_DBO) ////
+                {
+                //    elog(LOG, "DWEn.ew>> --- 6");
+                    dwen_suspend_engine(); ////
+                    engine_is_active = false;
+
+                    set_task_status(worker_task_id,DWEN_TASK_STATUS_READY);
+
+                    LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
+                    WorkersArr->Workers[w_ind].WorkerStatus = worker_status = DWEN_WORKER_STATUS_ACTIVE; // Статус воркера возвращаем в активное состояние
+                    WorkersArr->Workers[w_ind].TaskStatus = DWEN_WORKER_TASK_STATUS_WAIT; // Статус задачи сбрасываем
+                    LWLockRelease(WorkersArr->lock);
+
+                    ereport(LOG,
+                            errmsg("DWEn.ew>> ERROR Engine worker has been suspended."),
+                            errhint(
+                                "After the cause is resolved, call procedure 'select dwen.dwen_resume_engine();' to resume the process."
+                            ));
                 }
 
-                // elog(LOG, "DWEn.ew>> is_active = %d",is_active);
-                if (is_active) // Если движок активен
-                {
-                    if (TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_WAIT && check_ready_task)
+                if (engine_is_active) // Если движок активен
+                {   // Поток готов к обработке новой задачи
+                    if (worker_task_status == DWEN_WORKER_TASK_STATUS_WAIT && check_ready_task)
                     {
-                        // Поток готов к обработке новой задачи
-                        //int32 task_id = assign_next_task_to_worker(w_ind);
-
                         if (assign_next_task_to_worker(w_ind)) // Нашлась задача, готовая к заупску
                         {
                             // Будим исполнительный процесс
@@ -423,26 +367,26 @@ void dwen_worker_engine(Datum main_arg)
                             // Сброс флага наличия в очереди задач, готовых к запуску
                             check_ready_task = false;
 
-                            elog(LOG, "DWEn.ew>> DEBUG no tasks in READY status");
+                            elog(LOG, "DWEn.ew>> DEBUG no tasks in READY status"); // DBG
                         }
                     }
                 }
                 else // EngineActive = false
                 {
-                    elog(LOG, "DWEn.ew>> DataWarehouse engine suspended");
+                    elog(LOG, "DWEn.ew>> DataWarehouse engine suspended"); // DBG
                 }
             }
             DWEnEngineState->TickTimers = false; // Сброс флага минутного таймера
         }
-        else // dwen_worker_engine_sigterm = true
+        else // Вызвана команда заврешения процесса управляющего воркера  / dwen_worker_engine_sigterm = true
         {
             ereport(LOG, (errmsg("DWEn.ew>> Engine worker got SIGTERM. Shutting down executor workers.")));
             // Завершаем все исполнительные процессы
             for (int ind = 0; ind < dwen_active_execution_workers_count; ind++)
             {
                 LWLockAcquire(WorkersArr->lock, LW_SHARED);
-                WorkerCurrentStatus = WorkersArr->Workers[ind].WorkerStatus;
-                TaskCurrentStatus = WorkersArr->Workers[ind].TaskStatus;
+                worker_status = WorkersArr->Workers[ind].WorkerStatus;
+                worker_task_status = WorkersArr->Workers[ind].TaskStatus;
 
                 /* Сбрасываем статус воркера и задачи */
                 WorkersArr->Workers[ind].WorkerStatus = DWEN_WORKER_STATUS_STOPPED;
@@ -452,15 +396,15 @@ void dwen_worker_engine(Datum main_arg)
                 pid = WorkersArr->Workers[ind].pid;
 
                 LWLockRelease(WorkersArr->lock);
-                if (WorkerCurrentStatus != DWEN_WORKER_STATUS_STOPPED)
+                if (worker_status != DWEN_WORKER_STATUS_STOPPED)
                 {
                     if (kill(pid, SIGTERM) == 0)
                     {
                         elog(LOG, "DWEn.ew>> Sent SIGTERM to execution worker [%02d] / PID %d ",ind, pid);
                     }
 
-                    if (WorkerCurrentStatus == DWEN_WORKER_STATUS_ACTIVE
-                        && TaskCurrentStatus == DWEN_WORKER_TASK_STATUS_EXECUTION)
+                    if (worker_status == DWEN_WORKER_STATUS_ACTIVE
+                        && worker_task_status == DWEN_WORKER_TASK_STATUS_EXECUTION)
                     {
                         /* Сбрасываем статус задачи */
                         set_task_status(worker_task_id,DWEN_TASK_STATUS_READY);
@@ -600,9 +544,6 @@ bool assign_next_task_to_worker(int worker_index)
             LWLockReleaseAll();
             AbortCurrentTransaction();
             MemoryContextSwitchTo(extra_memory_context_engine);
-
-            dwen_suspend_engine();
-
             debug_query_string = query_get_next_task_id;
             ereport(LOG,
                     errcode(error_data->sqlerrcode),
@@ -615,10 +556,26 @@ bool assign_next_task_to_worker(int worker_index)
                     ));
 
             FreeErrorData(error_data);
-        }
+           dwen_suspend_engine();
+        // LWLockAcquire(WorkersArr->lock, LW_EXCLUSIVE);
+        // WorkersArr->EngineActive = false;
+        // LWLockRelease(WorkersArr->lock);
+            //
+            // LWLockAcquire(WorkersArr->lock, LW_SHARED);
+            // bool x  = WorkersArr->EngineActive;
+            // LWLockRelease(WorkersArr->lock);
+            // if (x)
+            //     elog(LOG, "DWEn ENG >>> SUSPEND x = true");
+            // else
+            //     elog(LOG, "DWEn ENG >>> SUSPEND x = false");
+
+            }
     PG_END_TRY();
     MemoryContextSwitchTo(work_context);
     MemoryContextReset(extra_memory_context_engine);
+
+
+
     pgstat_report_activity(STATE_IDLE, NULL);
     debug_query_string = NULL;
 
@@ -773,6 +730,7 @@ void launch_executor_worker(int index)
         {
             WorkersArr->Workers[index].WorkerStatus = DWEN_WORKER_STATUS_STARTUP;
             WorkersArr->Workers[index].TaskStatus = DWEN_WORKER_TASK_STATUS_UNDEFINED;
+            WorkersArr->Workers[index].start_counter += 1;
             //elog(LOG, "WF worker[%02d] started with PID %d", index, WorkersArr->Workers[index].pid);
             // ereport(NOTICE,
             //         (errmsg("DWEn >> execution worker[%02d] started with PID %d", index, WorkersArr->Workers[index].pid)));

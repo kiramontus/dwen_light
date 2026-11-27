@@ -23,11 +23,11 @@
 #define DWEN_WORKER_TASK_STATUS_WAIT 1
 #define DWEN_WORKER_TASK_STATUS_NEW 2
 #define DWEN_WORKER_TASK_STATUS_EXECUTION 3
-#define DWEN_WORKER_TASK_STATUS_DONE 4
-#define DWEN_WORKER_TASK_STATUS_ERROR 5 // Произошла ошибка внтури кода из dwen.task.execute_string
-#define DWEN_WORKER_TASK_STATUS_CANCELED 6 // Выполнение кода отменено, транзакция не зафиксирована
+#define DWEN_WORKER_TASK_STATUS_DONE 4 // FIN
+#define DWEN_WORKER_TASK_STATUS_ERROR 5 // FIN Произошла ошибка внтури кода из dwen.task.execute_string
+#define DWEN_WORKER_TASK_STATUS_CANCELED 6 // FIN Выполнение кода отменено, транзакция не зафиксирована
 #define DWEN_WORKER_TASK_STATUS_WARNING 7 // Ошибка модификации
-#define DWEN_WORKER_TASK_STATUS_TIMEOUT 8 // Превышен таймаут по задаче из dwen.task.timeout_minutes
+#define DWEN_WORKER_TASK_STATUS_TIMEOUT 8 // FIN Превышен таймаут по задаче из dwen.task.timeout_minutes
 // ADD TO MONITOR!!!!
 
 
@@ -47,6 +47,7 @@ typedef struct DWEnWorker
 	uint32_t	TaskId;
 	int			TimeoutTimer;
 	int			TimeoutTreshhold;
+    uint8_t		start_counter; // Количество перезапусков процесса при превышении 2х неудачных перезапусков воркер принудительно останавливается и более не используется
 }			DWFWorker;
 
 #define DWEN_MAX_WORKERS 4
